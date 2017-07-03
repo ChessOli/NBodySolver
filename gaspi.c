@@ -30,19 +30,52 @@ typedef struct {
     double vx, vy, vz, ax, ay, az;
 } Particle_local_data;
 
+/*
+      do_simulation: allocates memory and contains loop for simulation
+
+      move_part: moves particles by dt using the calculated acceleration
+
+      calculate_acc_total: calculate acceleration for all particles, uses communication functions + calculate_acc_local + calculate_acc_extern
+
+      calculate_acc_local: calculate acceleration for local particles due to local particles
+
+      calculate_acc_extern: calculate acceleration for local particles due to ext_particles_send_data
+
+      set_initial_conditions: initialize local particles
+*/
+
 
 void do_simulation(const double dt, const int n_steps, const int n_bodies, const int n_proc, const int me_proc);
+
 void move_part(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies, const double dt);
 
-void calculate_acc_total(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data,
-                         Particle_send_data* particles_buffer_1, Particle_send_data* particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc);
+void calculate_acc_total(const Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data,
+                          Particle_send_data*  const restrict particles_buffer_1, Particle_send_data* const restrict particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc);
 
 
-void calculate_acc_local(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies);
+void calculate_acc_local(const Particle_send_data * const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies);
 
-void calculate_acc_extern(Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data, const Particle_send_data* const restrict ext_particles_send_data, int n_bodies);
+void calculate_acc_extern(const Particle_send_data* const restrict own_particles_send_data,
+                          Particle_local_data* const own_particles_local_data, const Particle_send_data* const restrict ext_particles_send_data, const int n_bodies);
 
 void set_initial_conditions(Particle_send_data* own_particle_send_data, Particle_local_data* own_particle_local_data, const int n_bodies, const int me_proc);
+
+
+/* functions for communication
+    wait_for_particles: waits until received particles in segment_send_id from left partner and checks wether notify_value is equal to asserted_notification_values
+
+    send_particles: sends particles from segment_send_id to segment_recv_id from right partner
+
+    notify_ready_for_new_particles: notifies left partner that new particles can be sent, segment_id_remote is only used for communication (use 0 here).
+
+    wait_for_ready_for_new_particles: waits for a notify of right partner to send new particles
+*/
+void wait_for_particles(const gaspi_segment_id_t segment_recv_id, const int me_proc, const int n_proc, const int asserted_notification_values);
+void send_particles(gaspi_segment_id_t const segment_send_id, gaspi_segment_id_t const segment_recv_id, const int me_proc, const int n_proc , const int n_bodies, const int send_values, gaspi_queue_id_t const queue_id);
+void notify_ready_for_new_particles(const gaspi_segment_id_t segment_id_remote, const int me_proc, const int n_proc, const gaspi_notification_t notify_value, const gaspi_queue_id_t queue);
+void wait_for_ready_for_new_particles(const gaspi_segment_id_t segment_recv_id, const int me_proc, const int n_proc, const int asserted_notification_values);
+
+
 
 void sum_values(const Particle_send_data* const own_particle_send_data, double* sum,int size) {
     sum[0] = 0;
@@ -116,7 +149,7 @@ void do_simulation(const double dt, const int n_steps, const int n_bodies, const
     return;
 }
 
-void wait_for_particles(gaspi_segment_id_t const segment_recv_id, int me_proc, int n_proc, int asserted_notification_values) {
+void wait_for_particles(const gaspi_segment_id_t segment_recv_id, const int me_proc, const int n_proc, const int asserted_notification_values) {
     gaspi_notification_id_t id;
     gaspi_notification_t value;
     SUCCESS_OR_DIE(gaspi_notify_waitsome (segment_recv_id, LEFT(me_proc, n_proc), 1, &id, GASPI_BLOCK));
@@ -125,19 +158,19 @@ void wait_for_particles(gaspi_segment_id_t const segment_recv_id, int me_proc, i
     ASSERT(value==asserted_notification_values);
 }
 
-void send_particles(gaspi_segment_id_t const segment_send_id, gaspi_segment_id_t const segment_recv_id, int me_proc, int n_proc , int n_bodies, int send_values, gaspi_queue_id_t const queue_id) {
+void send_particles(gaspi_segment_id_t const segment_send_id,
+                    gaspi_segment_id_t const segment_recv_id, const int me_proc, const int n_proc , const int n_bodies, const int send_values, gaspi_queue_id_t const queue_id) {
     gaspi_offset_t const loc_off = 0;
     gaspi_offset_t const rem_off = 0;
-    gaspi_notification_id_t sender = me_proc;
+    const gaspi_notification_id_t sender = me_proc;
     SUCCESS_OR_DIE(gaspi_write_notify( segment_send_id,loc_off, RIGHT(me_proc, n_proc), segment_recv_id, rem_off, n_bodies * sizeof(Particle_send_data), sender, send_values, queue_id,GASPI_BLOCK));
 }
-
 void notify_ready_for_new_particles(const gaspi_segment_id_t segment_id_remote, const int me_proc, const int n_proc, const gaspi_notification_t notify_value, const gaspi_queue_id_t queue) {
     gaspi_notification_id_t sender = me_proc;
     SUCCESS_OR_DIE(gaspi_notify (segment_id_remote, LEFT(me_proc, n_proc), sender, notify_value, queue, GASPI_BLOCK ));
 }
 
-void wait_for_ready_for_new_particles(gaspi_segment_id_t const segment_recv_id, int me_proc, int n_proc, int asserted_notification_values) {
+void wait_for_ready_for_new_particles(const gaspi_segment_id_t segment_recv_id, const int me_proc, const int n_proc, const int asserted_notification_values) {
     gaspi_notification_id_t id;
     gaspi_notification_t value;
     SUCCESS_OR_DIE(gaspi_notify_waitsome (segment_recv_id, RIGHT(me_proc, n_proc), 1, &id, GASPI_BLOCK));
@@ -146,8 +179,8 @@ void wait_for_ready_for_new_particles(gaspi_segment_id_t const segment_recv_id, 
     ASSERT(value==asserted_notification_values);
 }
 
-void calculate_acc_total(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data,
-                         Particle_send_data* particles_buffer_1, Particle_send_data* particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc) {
+void calculate_acc_total(const Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data,
+                          Particle_send_data*  const restrict particles_buffer_1, Particle_send_data* const restrict particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc) {
     gaspi_segment_id_t const segment_id_own_particles = 0;
     gaspi_segment_id_t const segment_id_buffer_1 = 1;
     gaspi_segment_id_t const segment_id_buffer_2 = 2;
@@ -195,14 +228,13 @@ void calculate_acc_total(Particle_send_data* const own_particles_send_data, Part
         } else {
             calculate_acc_extern(own_particles_send_data, own_particles_local_data,particles_buffer_2, n_bodies);
         }
-
         SUCCESS_OR_DIE(gaspi_wait (queue_id_particles, GASPI_BLOCK));
         SUCCESS_OR_DIE(gaspi_wait (queue_id_notify_processed_particles, GASPI_BLOCK));
     }
     return;
 }
 
-void calculate_acc_local(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies) {
+void calculate_acc_local(const Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies) {
     for(int i = 0;i <n_bodies;i++) {
         for(int j = i+1; j<n_bodies; j++) {
             double dx = own_particles_send_data[i].x - own_particles_send_data[j].x;
@@ -226,7 +258,7 @@ void calculate_acc_local(Particle_send_data* const own_particles_send_data, Part
     return;
 }
 
-void calculate_acc_extern(Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data, const Particle_send_data* const restrict ext_particles_send_data, int n_bodies) {
+void calculate_acc_extern(const Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data, const Particle_send_data* const restrict ext_particles_send_data, const int n_bodies) {
     for(int i = 0; i < n_bodies; i++) {
         for(int j = 0; j < n_bodies; j++) {
             double dx = own_particles_send_data[i].x - ext_particles_send_data[j].x;
