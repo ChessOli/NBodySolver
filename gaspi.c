@@ -116,32 +116,88 @@ void do_simulation(const double dt, const int n_steps, const int n_bodies, const
     return;
 }
 
+void wait_for_particles(gaspi_segment_id_t const segment_recv_id, int me_proc, int n_proc, int asserted_notification_values) {
+    gaspi_notification_id_t id;
+    gaspi_notification_t value;
+    SUCCESS_OR_DIE(gaspi_notify_waitsome (segment_recv_id, LEFT(me_proc, n_proc), 1, &id, GASPI_BLOCK));
+    ASSERT(id == LEFT(me_proc, n_proc));
+    SUCCESS_OR_DIE(gaspi_notify_reset (segment_recv_id, id, &value));
+    ASSERT(value==asserted_notification_values);
+}
 
-
-void calculate_acc_total(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, Particle_send_data* particles_buffer_1, Particle_send_data* particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc) {
-    gaspi_segment_id_t const segment_id_own_particles = 0;
-    gaspi_segment_id_t const segment_id_buffer_1 = 1;
-    gaspi_segment_id_t const segment_id_buffer_2 = 2;
-    gaspi_queue_id_t const queue_id = 0;
+void send_particles(gaspi_segment_id_t const segment_send_id, gaspi_segment_id_t const segment_recv_id, int me_proc, int n_proc , int n_bodies, int send_values, gaspi_queue_id_t const queue_id) {
     gaspi_offset_t const loc_off = 0;
     gaspi_offset_t const rem_off = 0;
     gaspi_notification_id_t sender = me_proc;
-    gaspi_notification_t value;
-    SUCCESS_OR_DIE(gaspi_wait (queue_id, GASPI_BLOCK));
+    SUCCESS_OR_DIE(gaspi_write_notify( segment_send_id,loc_off, RIGHT(me_proc, n_proc), segment_recv_id, rem_off, n_bodies * sizeof(Particle_send_data), sender, send_values, queue_id,GASPI_BLOCK));
+}
+
+void notify_ready_for_new_particles(const gaspi_segment_id_t segment_id_remote, const int me_proc, const int n_proc, const gaspi_notification_t notify_value, const gaspi_queue_id_t queue) {
+    gaspi_notification_id_t sender = me_proc;
+    SUCCESS_OR_DIE(gaspi_notify (segment_id_remote, LEFT(me_proc, n_proc), sender, notify_value, queue, GASPI_BLOCK ));
+}
+
+void wait_for_ready_for_new_particles(gaspi_segment_id_t const segment_recv_id, int me_proc, int n_proc, int asserted_notification_values) {
     gaspi_notification_id_t id;
+    gaspi_notification_t value;
+    SUCCESS_OR_DIE(gaspi_notify_waitsome (segment_recv_id, RIGHT(me_proc, n_proc), 1, &id, GASPI_BLOCK));
+    ASSERT(id == RIGHT(me_proc, n_proc));
+    SUCCESS_OR_DIE(gaspi_notify_reset (segment_recv_id, id, &value));
+    ASSERT(value==asserted_notification_values);
+}
+
+void calculate_acc_total(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data,
+                         Particle_send_data* particles_buffer_1, Particle_send_data* particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc) {
+    gaspi_segment_id_t const segment_id_own_particles = 0;
+    gaspi_segment_id_t const segment_id_buffer_1 = 1;
+    gaspi_segment_id_t const segment_id_buffer_2 = 2;
+
+    gaspi_queue_id_t const queue_id_particles = 0;
+    gaspi_queue_id_t const queue_id_notify_processed_particles = 1;
+
+    SUCCESS_OR_DIE(gaspi_wait (queue_id_particles, GASPI_BLOCK));
     if(n_proc==1) {
         calculate_acc_local(own_particles_send_data, own_particles_local_data, n_bodies);
     } else if(n_proc==2) {
-        SUCCESS_OR_DIE(gaspi_write_notify( segment_id_own_particles,loc_off, RIGHT(me_proc, n_proc), segment_id_buffer_1, rem_off, n_bodies * sizeof(Particle_send_data), sender, 1, queue_id,GASPI_BLOCK));
+        send_particles(segment_id_own_particles, segment_id_buffer_1, me_proc, n_proc, n_bodies, 1, queue_id_particles);
         calculate_acc_local(own_particles_send_data, own_particles_local_data, n_bodies);
-        SUCCESS_OR_DIE(gaspi_notify_waitsome (segment_id_buffer_1, LEFT(me_proc, n_proc), 1, &id, GASPI_BLOCK));
-        ASSERT(id == LEFT(me_proc, n_proc));
-        SUCCESS_OR_DIE(gaspi_notify_reset (segment_id_buffer_1,
-                                              id,
-                                              &value));
-        ASSERT(value==1);
+        wait_for_particles(segment_id_buffer_1, me_proc, n_proc, 1);
 
         calculate_acc_extern(own_particles_send_data, own_particles_local_data,particles_buffer_1, n_bodies);
+    } else {
+        send_particles(segment_id_own_particles, segment_id_buffer_1, me_proc, n_proc, n_bodies, 1, queue_id_particles);
+        calculate_acc_local(own_particles_send_data, own_particles_local_data, n_bodies);
+        wait_for_particles(segment_id_buffer_1, me_proc, n_proc, 1);
+        send_particles(segment_id_buffer_1, segment_id_buffer_2, me_proc, n_proc, n_bodies, 2, queue_id_particles);
+        calculate_acc_extern(own_particles_send_data, own_particles_local_data,particles_buffer_1, n_bodies);
+
+        gaspi_segment_id_t  segment_id_send = segment_id_buffer_1;
+        gaspi_segment_id_t  segment_id_recv = segment_id_buffer_2;
+
+        for(int i=3;i<n_proc;i++) {
+            wait_for_particles(segment_id_recv, me_proc, n_proc, i-1);
+            SUCCESS_OR_DIE(gaspi_wait (queue_id_particles, GASPI_BLOCK));
+            notify_ready_for_new_particles(segment_id_own_particles, me_proc, n_proc, i, queue_id_notify_processed_particles);
+            wait_for_ready_for_new_particles(segment_id_own_particles, me_proc, n_proc, i);
+            send_particles(segment_id_recv, segment_id_send, me_proc, n_proc, n_bodies, i, queue_id_particles);
+            if(segment_id_recv==1) {
+                calculate_acc_extern(own_particles_send_data, own_particles_local_data,particles_buffer_1, n_bodies);
+            } else {
+                calculate_acc_extern(own_particles_send_data, own_particles_local_data,particles_buffer_2, n_bodies);
+            }
+            gaspi_segment_id_t tmp = segment_id_send;
+            segment_id_send = segment_id_recv;
+            segment_id_recv = tmp;
+        }
+        wait_for_particles(segment_id_recv, me_proc, n_proc, n_proc-1);
+        if(segment_id_recv==1) {
+            calculate_acc_extern(own_particles_send_data, own_particles_local_data,particles_buffer_1, n_bodies);
+        } else {
+            calculate_acc_extern(own_particles_send_data, own_particles_local_data,particles_buffer_2, n_bodies);
+        }
+
+        SUCCESS_OR_DIE(gaspi_wait (queue_id_particles, GASPI_BLOCK));
+        SUCCESS_OR_DIE(gaspi_wait (queue_id_notify_processed_particles, GASPI_BLOCK));
     }
     return;
 }
