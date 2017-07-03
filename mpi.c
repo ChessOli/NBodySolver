@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include <time.h>
+#include <sys/time.h>
 #include <stddef.h>
 #define G (4*M_PI*M_PI)
 #ifndef M_PI
@@ -21,14 +21,30 @@ typedef struct {
 
 MPI_Datatype mpi_particle_send_data_type;
 
+/*
+      do_simulation: allocates memory and contains loop for simulation
+
+      move_part: moves particles by dt using the calculated acceleration
+
+      calculate_acc_total: calculate acceleration for all particles, uses communication functions + calculate_acc_local + calculate_acc_extern
+
+      calculate_acc_local: calculate acceleration for local particles due to local particles
+
+      calculate_acc_extern: calculate acceleration for local particles due to ext_particles_send_data
+
+      set_initial_conditions: initialize local particles
+*/
+
 void do_simulation(const double dt, const int n_steps, const int n_bodies, const int n_proc, const int me_proc);
 void move_part(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies, const double dt);
 
-void calculate_acc_total(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies, const int n_proc, const int me_proc);
+void calculate_acc_total(const Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data,
+                          Particle_send_data*  const restrict particles_buffer_1, Particle_send_data* const restrict particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc);
 
-void calculate_acc_local(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies);
+void calculate_acc_local(const Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies) ;
 
-void calculate_acc_extern(Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data, const Particle_send_data* const restrict ext_particles_send_data, int n_bodies);
+void calculate_acc_extern(const Particle_send_data* const restrict own_particles_send_data,
+                          Particle_local_data* const own_particles_local_data, const Particle_send_data* const restrict ext_particles_send_data, const int n_bodies);
 
 void set_initial_conditions(Particle_send_data* own_particle_send_data, Particle_local_data* own_particle_local_data, const int n_bodies, const int me_proc);
 
@@ -77,35 +93,41 @@ int main(int argc, char**argv)
 }
 
 void do_simulation(const double dt, const int n_steps, const int n_bodies, const int n_proc, const int me_proc) {
-    Particle_send_data* own_particle_send_data = (Particle_send_data*) malloc(3*sizeof(Particle_send_data)*n_bodies);
+    Particle_send_data* own_particle_send_data = (Particle_send_data*) malloc(sizeof(Particle_send_data)*n_bodies);
+    Particle_send_data* particles_buffer_1 = (Particle_send_data*) malloc(sizeof(Particle_send_data)*n_bodies);
+    Particle_send_data* particles_buffer_2 = (Particle_send_data*) malloc(sizeof(Particle_send_data)*n_bodies);
+
     Particle_local_data* own_particle_local_data = (Particle_local_data*) malloc(sizeof(Particle_local_data)*n_bodies);
 
     set_initial_conditions(own_particle_send_data, own_particle_local_data, n_bodies, me_proc);
 
-    time_t start = clock();
+    struct timeval start, end;
+    gettimeofday(&start, NULL);
     for(int i = 0; i < n_steps; i++) {
-        calculate_acc_total(own_particle_send_data, own_particle_local_data, n_bodies, n_proc, me_proc);
+        calculate_acc_total(own_particle_send_data, own_particle_local_data, particles_buffer_1, particles_buffer_2, n_bodies, n_proc, me_proc);
         move_part(own_particle_send_data, own_particle_local_data,n_bodies, dt);
     }
 
 
-    time_t end = clock();
+    gettimeofday(&end, NULL);
     double loc_sum[3];
     sum_values(own_particle_send_data, loc_sum, n_bodies);
     double glob_sum[3] = {0,0,0};
     MPI_Allreduce(loc_sum, glob_sum, 3, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
     if(me_proc == 0 || 1) {
-        printf("x: %f, y: %f, z: %f, xloc: %f, yloc: %f, zloc: %f, time: %f\n",glob_sum[0], glob_sum[1], glob_sum[2], loc_sum[0], loc_sum[1], loc_sum[2],(end-start)/(double)CLOCKS_PER_SEC );
+        printf("x: %f, y: %f, z: %f, xloc: %f, yloc: %f, zloc: %f, time: %f\n",glob_sum[0], glob_sum[1], glob_sum[2], loc_sum[0], loc_sum[1], loc_sum[2],(double)((end.tv_sec * 1000000 + end.tv_usec)
+                - (start.tv_sec * 1000000 + start.tv_usec))/1000000. );
     }
     return;
 }
 
 
 
-void calculate_acc_total(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies, const int n_proc, const int me_proc) {
-    Particle_send_data* ext_particles_send_data_1 = &own_particles_send_data[n_bodies];
-    Particle_send_data* ext_particles_send_data_2 = &own_particles_send_data[2*n_bodies];
+void calculate_acc_total(const Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data,
+                          Particle_send_data*  const restrict particles_buffer_1, Particle_send_data* const restrict particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc) {
+    Particle_send_data* restrict ext_particles_send_data_1 = particles_buffer_1;
+    Particle_send_data* restrict ext_particles_send_data_2 = particles_buffer_2;
     if(n_proc==1) {
         calculate_acc_local(own_particles_send_data, own_particles_local_data, n_bodies);
     } else if(n_proc ==2) {
@@ -155,7 +177,7 @@ void calculate_acc_total(Particle_send_data* const own_particles_send_data, Part
     return;
 }
 
-void calculate_acc_local(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies) {
+void calculate_acc_local(const Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies) {
     for(int i = 0;i <n_bodies;i++) {
         for(int j = i+1; j<n_bodies; j++) {
             double dx = own_particles_send_data[i].x - own_particles_send_data[j].x;
@@ -179,7 +201,8 @@ void calculate_acc_local(Particle_send_data* const own_particles_send_data, Part
     return;
 }
 
-void calculate_acc_extern(Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data, const Particle_send_data* const restrict ext_particles_send_data, int n_bodies) {
+void calculate_acc_extern(const Particle_send_data* const restrict own_particles_send_data,
+                          Particle_local_data* const own_particles_local_data, const Particle_send_data* const restrict ext_particles_send_data, const int n_bodies) {
     for(int i = 0; i < n_bodies; i++) {
         for(int j = 0; j < n_bodies; j++) {
             double dx = own_particles_send_data[i].x - ext_particles_send_data[j].x;

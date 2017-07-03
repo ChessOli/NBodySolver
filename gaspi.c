@@ -5,9 +5,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include <time.h>
+#include <sys/time.h>
 #include <stdio.h>
-#include <stdlib.h>
+
+
 #define G (4*M_PI*M_PI)
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -131,20 +132,22 @@ void do_simulation(const double dt, const int n_steps, const int n_bodies, const
 
     set_initial_conditions(own_particle_send_data, own_particle_local_data, n_bodies, me_proc);
 
-    time_t start = clock();
+    struct timeval start, end;
+    gettimeofday(&start, NULL);
     for(int i = 0; i < n_steps; i++) {
         calculate_acc_total(own_particle_send_data, own_particle_local_data, particles_buffer_1, particles_buffer_2, n_bodies, n_proc, me_proc);
         gaspi_barrier (GASPI_GROUP_ALL, GASPI_BLOCK );
         move_part(own_particle_send_data, own_particle_local_data,n_bodies, dt);
     }
-    time_t end = clock();
+    gettimeofday(&end, NULL);
     double loc_sum[3];
     sum_values(own_particle_send_data, loc_sum, n_bodies);
     double glob_sum[3] = {0,0,0};
     //gaspi_allreduce(loc_sum, glob_sum, 3, GASPI_OP_SUM, GASPI_TYPE_DOUBLE,  GASPI_GROUP_ALL, GASPI_BLOCK );
 
     if(me_proc == 0 || 1) {
-        printf("x: %f, y: %f, z: %f, xloc: %f, yloc: %f, zloc: %f, time: %f\n",glob_sum[0], glob_sum[1], glob_sum[2], loc_sum[0], loc_sum[1], loc_sum[2],(end-start)/(double)CLOCKS_PER_SEC );
+        printf("x: %f, y: %f, z: %f, xloc: %f, yloc: %f, zloc: %f, time: %f\n",glob_sum[0], glob_sum[1], glob_sum[2], loc_sum[0], loc_sum[1], loc_sum[2],(double)((end.tv_sec * 1000000 + end.tv_usec)
+                - (start.tv_sec * 1000000 + start.tv_usec))/1000000. );
     }
     return;
 }
