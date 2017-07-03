@@ -51,7 +51,7 @@ void do_simulation(const double dt, const int n_steps, const int n_bodies, const
 void move_part(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies, const double dt);
 
 void calculate_acc_total(const Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data,
-                          Particle_send_data*  const restrict particles_buffer_1, Particle_send_data* const restrict particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc);
+                          Particle_send_data*  const restrict particles_buffer_1, Particle_send_data* const restrict particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc, const int iterations_number);
 
 
 void calculate_acc_local(const Particle_send_data * const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies);
@@ -135,8 +135,7 @@ void do_simulation(const double dt, const int n_steps, const int n_bodies, const
     struct timeval start, end;
     gettimeofday(&start, NULL);
     for(int i = 0; i < n_steps; i++) {
-        calculate_acc_total(own_particle_send_data, own_particle_local_data, particles_buffer_1, particles_buffer_2, n_bodies, n_proc, me_proc);
-        gaspi_barrier (GASPI_GROUP_ALL, GASPI_BLOCK );
+        calculate_acc_total(own_particle_send_data, own_particle_local_data, particles_buffer_1, particles_buffer_2, n_bodies, n_proc, me_proc, i);
         move_part(own_particle_send_data, own_particle_local_data,n_bodies, dt);
     }
     gettimeofday(&end, NULL);
@@ -183,7 +182,7 @@ void wait_for_ready_for_new_particles(const gaspi_segment_id_t segment_recv_id, 
 }
 
 void calculate_acc_total(const Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data,
-                          Particle_send_data*  const restrict particles_buffer_1, Particle_send_data* const restrict particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc) {
+                          Particle_send_data*  const restrict particles_buffer_1, Particle_send_data* const restrict particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc, const int iterations_number) {
     gaspi_segment_id_t const segment_id_own_particles = 0;
     gaspi_segment_id_t const segment_id_buffer_1 = 1;
     gaspi_segment_id_t const segment_id_buffer_2 = 2;
@@ -195,12 +194,15 @@ void calculate_acc_total(const Particle_send_data* const restrict own_particles_
     if(n_proc==1) {
         calculate_acc_local(own_particles_send_data, own_particles_local_data, n_bodies);
     } else if(n_proc==2) {
+        gaspi_barrier (GASPI_GROUP_ALL, GASPI_BLOCK );
         send_particles(segment_id_own_particles, segment_id_buffer_1, me_proc, n_proc, n_bodies, 1, queue_id_particles);
         calculate_acc_local(own_particles_send_data, own_particles_local_data, n_bodies);
         wait_for_particles(segment_id_buffer_1, me_proc, n_proc, 1);
 
         calculate_acc_extern(own_particles_send_data, own_particles_local_data,particles_buffer_1, n_bodies);
     } else {
+        //check wether right neighbour finished last round => can use all buffer for communication
+        if(iterations_number!=0) wait_for_ready_for_new_particles(segment_id_own_particles, me_proc, n_proc, n_proc);
         send_particles(segment_id_own_particles, segment_id_buffer_1, me_proc, n_proc, n_bodies, 1, queue_id_particles);
         calculate_acc_local(own_particles_send_data, own_particles_local_data, n_bodies);
         wait_for_particles(segment_id_buffer_1, me_proc, n_proc, 1);
@@ -232,6 +234,7 @@ void calculate_acc_total(const Particle_send_data* const restrict own_particles_
             calculate_acc_extern(own_particles_send_data, own_particles_local_data,particles_buffer_2, n_bodies);
         }
         SUCCESS_OR_DIE(gaspi_wait (queue_id_particles, GASPI_BLOCK));
+        notify_ready_for_new_particles(segment_id_own_particles, me_proc, n_proc, n_proc, queue_id_notify_processed_particles);
         SUCCESS_OR_DIE(gaspi_wait (queue_id_notify_processed_particles, GASPI_BLOCK));
     }
     return;
