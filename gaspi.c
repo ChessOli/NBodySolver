@@ -51,15 +51,17 @@ void do_simulation(const double dt, const int n_steps, const int n_bodies, const
 void move_part(Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies, const double dt);
 
 void calculate_acc_total(const Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data,
-                          Particle_send_data*  const restrict particles_buffer_1, Particle_send_data* const restrict particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc, const int iterations_number);
+                          Particle_send_data*  const restrict particles_buffer_1, Particle_send_data* const restrict particles_buffer_2,
+                         const int n_bodies, const int n_proc, const int me_proc, const int iterations_number, const int n_steps);
 
 
-void calculate_acc_local(const Particle_send_data * const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies);
+void calculate_acc_local(const Particle_send_data* const own_particles_send_data, Particle_local_data* const own_particles_local_data, const int n_bodies) ;
 
 void calculate_acc_extern(const Particle_send_data* const restrict own_particles_send_data,
                           Particle_local_data* const own_particles_local_data, const Particle_send_data* const restrict ext_particles_send_data, const int n_bodies);
 
 void set_initial_conditions(Particle_send_data* own_particle_send_data, Particle_local_data* own_particle_local_data, const int n_bodies, const int me_proc);
+
 
 
 /* functions for communication
@@ -78,7 +80,7 @@ void wait_for_ready_for_new_particles(const gaspi_segment_id_t segment_recv_id, 
 
 
 
-void sum_values(const Particle_send_data* const own_particle_send_data, double* sum,int size) {
+void sum_values(const Particle_send_data* const own_particle_send_data, double* sum, const int size) {
     sum[0] = 0;
     sum[1] = 0;
     sum[2] = 0;
@@ -98,8 +100,8 @@ int main(int argc, char**argv)
     SUCCESS_OR_DIE(gaspi_proc_num (&n_proc));
 
     printf("proc: %i/ %i started\n", me_proc,n_proc);
-    const int n_steps = 20000;
-    const int n_bodies = 100;
+    const int n_steps = 100;
+    const int n_bodies = 6000;
     const double dt = 0.05;
 
 
@@ -135,7 +137,7 @@ void do_simulation(const double dt, const int n_steps, const int n_bodies, const
     struct timeval start, end;
     gettimeofday(&start, NULL);
     for(int i = 0; i < n_steps; i++) {
-        calculate_acc_total(own_particle_send_data, own_particle_local_data, particles_buffer_1, particles_buffer_2, n_bodies, n_proc, me_proc, i);
+        calculate_acc_total(own_particle_send_data, own_particle_local_data, particles_buffer_1, particles_buffer_2, n_bodies, n_proc, me_proc, i, n_steps);
         move_part(own_particle_send_data, own_particle_local_data,n_bodies, dt);
     }
     gettimeofday(&end, NULL);
@@ -182,7 +184,7 @@ void wait_for_ready_for_new_particles(const gaspi_segment_id_t segment_recv_id, 
 }
 
 void calculate_acc_total(const Particle_send_data* const restrict own_particles_send_data, Particle_local_data* const own_particles_local_data,
-                          Particle_send_data*  const restrict particles_buffer_1, Particle_send_data* const restrict particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc, const int iterations_number) {
+                          Particle_send_data*  const restrict particles_buffer_1, Particle_send_data* const restrict particles_buffer_2, const int n_bodies, const int n_proc, const int me_proc, const int iterations_number, const int n_steps) {
     gaspi_segment_id_t const segment_id_own_particles = 0;
     gaspi_segment_id_t const segment_id_buffer_1 = 1;
     gaspi_segment_id_t const segment_id_buffer_2 = 2;
@@ -233,8 +235,9 @@ void calculate_acc_total(const Particle_send_data* const restrict own_particles_
         } else {
             calculate_acc_extern(own_particles_send_data, own_particles_local_data,particles_buffer_2, n_bodies);
         }
-        SUCCESS_OR_DIE(gaspi_wait (queue_id_particles, GASPI_BLOCK));
         notify_ready_for_new_particles(segment_id_own_particles, me_proc, n_proc, n_proc, queue_id_notify_processed_particles);
+        if(iterations_number==n_steps-1) wait_for_ready_for_new_particles(segment_id_own_particles, me_proc, n_proc, n_proc);
+        SUCCESS_OR_DIE(gaspi_wait (queue_id_particles, GASPI_BLOCK));
         SUCCESS_OR_DIE(gaspi_wait (queue_id_notify_processed_particles, GASPI_BLOCK));
     }
     return;
